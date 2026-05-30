@@ -1,0 +1,49 @@
+{
+	"name": "idas-api",
+	"version": "2.0.0",
+	"description": "Institutional Data Analytics System API",
+	"homepage": "https://github.com/csonmez/idas-api#readme",
+	"bugs": {
+		"url": "https://github.com/csonmez/idas-api/issues"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/csonmez/idas-api.git"
+	},
+	"license": "ISC",
+	"author": "Cem Sönmez <cem.sonmez@outlook.com.tr>",
+	"type": "module",
+	"main": "dist/server.js",
+	"scripts": {
+		"dev": "tsx --env-file=.env watch src/server.ts",
+		"build": "tsc",
+		"start": "node --env-file=.env dist/server.js",
+		"db:migrate": "npx kysely migrate:latest",
+		"db:rollback": "npx kysely migrate:down",
+		"db:rollback:all": "kysely migrate:rollback --all --config .config/kysely.config.ts",
+		"db:make": "npx kysely migrate:make",
+		"db:codegen": "kysely-codegen --camel-case --singularize --out-file ./src/db/generated/db.ts",
+		"typecheck": "tsc --noEmit",
+		"check": "biome check --write ."
+	},
+	"dependencies": {
+		"cors": "^2.8.6",
+		"express": "^5.2.1",
+		"express-rate-limit": "^8.5.2",
+		"helmet": "^8.2.0",
+		"kysely": "^0.29.2",
+		"pg": "^8.21.0",
+		"zod": "^4.4.3"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.4.15",
+		"@types/cors": "^2.8.19",
+		"@types/express": "^5.0.6",
+		"@types/node": "^25.9.1",
+		"@types/pg": "^8.20.0",
+		"kysely-codegen": "^0.20.0",
+		"kysely-ctl": "^0.21.0",
+		"tsx": "^4.22.3",
+		"typescript": "^6.0.3"
+	}
+}
