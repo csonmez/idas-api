@@ -26,13 +26,13 @@ Token dogrulanip parola basariyla set edilince credential kaydi yoksa `user_cred
 id uuid primary key
 name varchar(255) not null
 surname varchar(255) not null
-email varchar(255) not null
+email varchar(255) not null unique
 user_type enum('ACADEMICIAN', 'POSTDOC', 'STAFF') not null
 title enum('PROFESSOR', 'ASSOCIATE_PROFESSOR', 'ASSISTANT_PROFESSOR', 'RESEARCH_ASSISTANT', 'RESEARCH_ASSISTANT_DOCTOR', 'LECTURER', 'LECTURER_DOCTOR', 'DOCTOR') null
 status enum('ACTIVE', 'INACTIVE') not null default 'ACTIVE'
 iban varchar(255) null
 created_at timestamptz not null default now()
-updated_at timestamptz not null
+updated_at timestamptz not null default now()
 deleted_at timestamptz null
 ```
 
@@ -65,7 +65,7 @@ last_login_at timestamptz null
 failed_login_count int not null default 0
 locked_until timestamptz null
 created_at timestamptz not null default now()
-updated_at timestamptz not null
+updated_at timestamptz not null default now()
 ```
 
 Notlar:
@@ -87,7 +87,7 @@ Notlar:
 
 ```text
 id uuid primary key
-user_id uuid not null references users(id) on delete cascade
+user_id uuid not null unique references users(id) on delete cascade
 token_hash varchar(64) not null unique
 expires_at timestamptz not null
 created_at timestamptz not null default now()
@@ -257,7 +257,7 @@ Islem:
 - Admin user create sadece `users` kaydi olusturmali.
 - Admin user create sonrasi `user_credentials` kaydi olusmamali.
 - Admin user create sonrasi `password_reset_tokens` kaydi olusmamali.
-- `users.email` case-insensitive unique index ile korunmali.
+- `users.email` inline unique constraint ile korunmali.
 - `users.email` uniqueness `deleted_at` degerinden bagimsiz olmali.
 - Credential kaydi olmayan user login olamamali.
 - Tum login failure durumlari generic hata mesaji dondurmeli.
@@ -310,7 +310,7 @@ Islem:
 - Email hem auth lookup hem admin iletisim bilgisi olarak `users.email` alaninda tek kaynak olacak.
 - User normal admin akisiyle silinmeyecek; aktiflik `users.status` uzerinden `ACTIVE` / `INACTIVE` olarak yonetilecek.
 - `users.deleted_at` kolonu simdilik tutulacak ama auth/list/filter lifecycle davranisina dahil edilmeyecek.
-- Email unique garanti DB tarafinda `lower(email)` unique index ile saglanacak.
+- Email unique garanti DB tarafinda `users.email` inline unique constraint ile saglanacak.
 - Email uniqueness `deleted_at` degerinden bagimsiz olacak; ayni email tekrar kullanilamayacak.
 - Mevcut v1'deki `password` alani v2'de `user_credentials.password_hash` modeline tasinacak.
 - Mevcut v1'deki `isSetPassword` kaldirilacak; credential kaydinin varligi bu bilgiyi temsil edecek.
