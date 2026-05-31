@@ -22,7 +22,7 @@
 		"db:rollback": "npx kysely migrate:down",
 		"db:rollback:all": "kysely migrate:rollback --all --config .config/kysely.config.ts",
 		"db:make": "npx kysely migrate:make",
-		"db:codegen": "kysely-codegen --camel-case --singularize --out-file ./src/db/generated/db.ts",
+		"db:codegen": "kysely-codegen --camel-case --singularize --out-file ./src/database/db.generated.ts",
 		"typecheck": "tsc --noEmit",
 		"check": "biome check --write ."
 	},
