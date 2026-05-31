@@ -88,25 +88,26 @@ Notlar:
 ```text
 id uuid primary key
 user_id uuid not null references users(id) on delete cascade
-token_hash char(64) not null unique
+token_hash varchar(64) not null unique
 expires_at timestamptz not null
 created_at timestamptz not null default now()
-updated_at timestamptz not null
-request_ip inet null
-user_agent text null
 ```
 
 Notlar:
 
 - Bu tablo hem ilk parola olusturma hem de parola sifirlama icin kullanilacak.
-- Raw token DB'de tutulmayacak; sadece SHA-256 hash'i tutulacak.
+- Raw token `crypto.randomBytes(32).toString('base64url')` ile uretilecek.
+- Raw token DB'de tutulmayacak; sadece SHA-256 hex digest'i `token_hash` olarak tutulacak.
+- Token yuksek entropili oldugu icin bcrypt/argon2 gibi slow hash kullanilmayacak.
+- HMAC-SHA-256 su an kullanilmayacak; ileride token secret'i DB'den ayri bir yerde yonetilecekse defense-in-depth olarak degerlendirilecek.
 - Bu tablo operasyonel/gecici tablo olacak; audit/history tablosu gibi kullanilmayacak.
 - Ayni user icin ayni anda tek token yeterli olacak.
 - `password_reset_tokens.user_id` unique olacak; boylece ayni user icin tek token kurali DB seviyesinde garanti edilecek.
 - Yeni token uretilirken ayni user'a ait mevcut token kaydi transaction icinde hard delete edilip yeni token insert edilecek.
 - Token basariyla kullanildiktan sonra ilgili token kaydi hard delete edilecek.
 - Expire olmus tokenlar scheduler/cron ile periyodik olarak hard delete edilecek.
-- Audit gerekiyorsa token tablosunda degil, `audit_logs` icinde event olarak tutulacak.
+- IP ve user-agent gibi request metadata token tablosunda tutulmayacak.
+- Audit gerekiyorsa token tablosunda degil, `audit_logs` icinde event metadata olarak tutulacak.
 - `password_reset_tokens.user_id` unique index ayni zamanda user bazli sorgu/delete islemlerini hizlandiracak.
 
 ## Auth Flow
@@ -158,14 +159,14 @@ Boylece "user var ama parola kurmamis", "passive user", "credential kaydi yok" g
 3. `status = ACTIVE` olan `users` kaydi case-insensitive email lookup ile aranir.
 4. User yoksa disariya generic response donulur; email enumeration yapilmaz.
 5. User varsa transaction icinde ayni user'a ait mevcut token kaydi hard delete edilir.
-6. Random reset token uretilir.
-7. DB'ye raw token degil, SHA-256 token hash yazilir.
+6. `crypto.randomBytes(32).toString('base64url')` ile random reset token uretilir.
+7. DB'ye raw token degil, SHA-256 hex digest token hash yazilir.
 8. `expires_at = now + 1 hour` set edilir.
 9. Email linkinde raw token gonderilir.
 
 ### Password Set / Reset
 
-1. Gelen token SHA-256 ile hashlenir.
+1. Gelen raw token SHA-256 hex digest'e cevrilir.
 2. Transaction icinde `password_reset_tokens.token_hash` ile token kaydi bulunur ve row lock alinir.
 3. Token yoksa veya expire olduysa islem reddedilir.
 4. Token'in bagli oldugu user aktif degilse islem reddedilir.
@@ -212,10 +213,13 @@ Credential upsert app seviyesinde `find -> create/update` olarak yapilmayacak. `
 - Ayri salt kolonu tutulmayacak.
 - Reset token ayri tabloda tutulacak.
 - Reset token tablosu gecici operasyonel tablo olacak; kalici gecmis tutmayacak.
-- Reset token DB'de raw halde tutulmayacak; sadece hash'i tutulacak.
+- Reset token `crypto.randomBytes(32).toString('base64url')` ile uretilecek.
+- Reset token DB'de raw halde tutulmayacak; sadece SHA-256 hex digest'i tutulacak.
+- Reset token yuksek entropili oldugu icin bcrypt/argon2 gibi slow hash kullanilmayacak.
+- HMAC-SHA-256 su an kullanilmayacak; ileride secret DB'den ayri yonetilecekse defense-in-depth olarak degerlendirilecek.
 - Reset token basariyla kullanilinca hard delete edilecek.
 - Expire tokenlar scheduler/cron ile hard delete edilecek.
-- Password reset audit bilgisi gerekiyorsa `audit_logs` eventleriyle tutulacak.
+- Password reset audit bilgisi gerekiyorsa IP ve user-agent dahil request metadata `audit_logs` eventleriyle tutulacak.
 - `PASSWORD_RESET_REQUESTED`, `PASSWORD_RESET_COMPLETED`, `LOGIN_FAILED`, `ACCOUNT_LOCKED` audit eventleri desteklenecek.
 - `ACCOUNT_UNLOCKED_BY_ADMIN` audit event'i desteklenecek.
 - Forgot password response'u user var/yok bilgisini belli etmeyecek.
