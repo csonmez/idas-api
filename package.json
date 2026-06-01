@@ -18,10 +18,10 @@
 		"dev": "tsx --env-file=.env watch src/server.ts",
 		"build": "tsc",
 		"start": "node --env-file=.env dist/server.js",
-		"db:migrate": "npx kysely migrate:latest",
-		"db:rollback": "npx kysely migrate:down",
+		"db:migrate": "kysely migrate:latest --config .config/kysely.config.ts",
+		"db:rollback": "kysely migrate:down --config .config/kysely.config.ts",
 		"db:rollback:all": "kysely migrate:rollback --all --config .config/kysely.config.ts",
-		"db:make": "npx kysely migrate:make",
+		"db:make": "kysely migrate:make --config .config/kysely.config.ts",
 		"db:codegen": "kysely-codegen --camel-case --singularize --out-file ./src/database/db.generated.ts",
 		"typecheck": "tsc --noEmit",
 		"check": "biome check --write ."
