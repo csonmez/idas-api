@@ -5,9 +5,19 @@
 
 import type { ColumnType } from "kysely";
 
+export type AcademicAffiliationType = "PRIMARY" | "SECONDARY";
+
+export type AcademicField = "HEALTH" | "SCIENCE_ENGINEERING" | "SOCIAL";
+
+export type AcademicUnitType = "FACULTY" | "INSTITUTE" | "SCHOOL" | "VOCATIONAL_SCHOOL";
+
 export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
   ? ColumnType<S, I | undefined, U>
   : ColumnType<T, T | undefined, T>;
+
+export type RoleScopeType = "ACADEMIC_UNIT" | "DEPARTMENT" | "DISCIPLINE" | "GLOBAL";
+
+export type SubUnitLevel = "DEPARTMENT" | "DISCIPLINE";
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
@@ -17,11 +27,88 @@ export type UserTitle = "ASSISTANT_PROFESSOR" | "ASSOCIATE_PROFESSOR" | "DOCTOR"
 
 export type UserType = "ACADEMICIAN" | "POSTDOC" | "STAFF";
 
+export interface AcademicUnit {
+  academicField: AcademicField | null;
+  address: string | null;
+  code: string;
+  createdAt: Generated<Timestamp>;
+  deletedAt: Timestamp | null;
+  email: string | null;
+  id: Generated<string>;
+  isTracked: Generated<boolean>;
+  name: string;
+  phone: string | null;
+  shortName: string | null;
+  subUnitLevel: Generated<SubUnitLevel>;
+  type: AcademicUnitType;
+  updatedAt: Generated<Timestamp>;
+  website: string | null;
+}
+
+export interface Department {
+  academicUnitId: string;
+  address: string | null;
+  code: string;
+  createdAt: Generated<Timestamp>;
+  deletedAt: Timestamp | null;
+  email: string | null;
+  id: Generated<string>;
+  name: string;
+  phone: string | null;
+  shortName: string | null;
+  updatedAt: Generated<Timestamp>;
+  website: string | null;
+}
+
+export interface Discipline {
+  academicUnitId: string;
+  address: string | null;
+  code: string;
+  createdAt: Generated<Timestamp>;
+  deletedAt: Timestamp | null;
+  departmentId: string;
+  email: string | null;
+  id: Generated<string>;
+  name: string;
+  phone: string | null;
+  shortName: string | null;
+  updatedAt: Generated<Timestamp>;
+  website: string | null;
+}
+
 export interface PasswordResetToken {
   createdAt: Generated<Timestamp>;
   expiresAt: Timestamp;
   id: Generated<string>;
   tokenHash: string;
+  userId: string;
+}
+
+export interface RolePermission {
+  academicUnitId: string | null;
+  createdAt: Generated<Timestamp>;
+  deletedAt: Timestamp | null;
+  departmentId: string | null;
+  disciplineId: string | null;
+  endDate: Timestamp | null;
+  id: Generated<string>;
+  permissions: Generated<string[]>;
+  role: string;
+  scopeType: Generated<RoleScopeType>;
+  startDate: Timestamp | null;
+  updatedAt: Generated<Timestamp>;
+  userId: string;
+}
+
+export interface UserAcademicAffiliation {
+  academicUnitId: string | null;
+  affiliationType: Generated<AcademicAffiliationType>;
+  createdAt: Generated<Timestamp>;
+  deletedAt: Timestamp | null;
+  departmentId: string | null;
+  disciplineId: string | null;
+  id: Generated<string>;
+  updatedAt: Generated<Timestamp>;
   userId: string;
 }
 
@@ -52,7 +139,12 @@ export interface User {
 }
 
 export interface DB {
+  academicUnits: AcademicUnit;
+  departments: Department;
+  disciplines: Discipline;
   passwordResetTokens: PasswordResetToken;
+  rolePermissions: RolePermission;
+  userAcademicAffiliations: UserAcademicAffiliation;
   userCredentials: UserCredential;
   users: User;
 }
