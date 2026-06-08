@@ -1,0 +1,88 @@
+# IDAS V2 Migration Order
+
+## Completed
+
+```text
+01 create_users_table
+02 create_user_credentials_table
+03 create_password_reset_tokens_table
+04 create_academic_units_table
+05 create_departments_table
+06 create_disciplines_table
+07 create_user_academic_affiliations_table
+08 create_role_permissions_table
+```
+
+## Recommended Next Order
+
+```text
+09 create_terms_table
+10 create_term_processes_table
+11 create_performance_target_entry_windows_table
+
+12 create_journals_table
+13 create_journal_metrics_table
+14 create_articles_table
+15 create_article_citation_counts_table
+16 create_user_articles_table
+
+17 create_project_types_table
+18 create_project_statuses_table
+19 create_project_roles_table
+20 create_project_type_statuses_table
+21 create_project_type_roles_table
+22 create_projects_table
+23 create_project_incoming_budgets_table
+24 create_user_projects_table
+
+25 create_patents_table
+26 create_user_patents_table
+
+27 create_prizes_table
+28 create_user_prizes_table
+
+29 create_postgraduates_table
+30 create_user_postgraduates_table
+
+31 create_target_definitions_table
+32 create_target_groups_table
+33 create_target_indicators_table
+34 create_target_indicator_award_weights_table
+35 create_target_assignments_table
+36 create_target_values_table
+
+37 create_target_calculation_runs_table
+38 create_target_actuals_table
+39 create_target_scores_table
+
+40 create_incentive_process_details_table
+41 create_incentive_rules_table
+42 create_incentive_limits_table
+43 create_incentive_collaboration_rates_table
+44 create_user_incentives_table
+45 create_user_incentive_approvals_table
+
+46 create_audit_logs_table
+47 create_error_logs_table
+48 create_tickets_table
+49 create_ticket_messages_table
+
+50 create_performance_awards_table
+51 create_performance_award_scores_table
+```
+
+## Replace / Skip From V1
+
+```text
+create_session -> skip
+create_university -> skip
+create_term_period -> create_term_processes_table + create_performance_target_entry_windows_table
+create_term_period_exception -> skip for now
+create_target -> create_target_definitions/groups/indicators tables
+create_user_target -> create_target_assignments + create_target_values
+create_faculty_target -> create_target_assignments + create_target_values
+create_department_target -> create_target_assignments + create_target_values
+create_discipline_target -> create_target_assignments + create_target_values
+create_university_target -> create_target_assignments + create_target_values
+create_incentive_term -> term_processes(process_type = INCENTIVE) + optional incentive_process_details
+```
