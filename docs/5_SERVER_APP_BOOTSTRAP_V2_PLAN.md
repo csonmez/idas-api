@@ -47,7 +47,7 @@ src/
 Notlar:
 
 - Dosya adlari ileride feature klasor yapisina gore degisebilir; temel prensip sorumluluk ayrimidir.
-- `database` katmani mevcut `docs/DATABASE_STRUCTURE_PLAN.md` kararlarini takip edecek.
+- `database` katmani mevcut `docs/2_DATABASE_STRUCTURE_PLAN.md` kararlarini takip edecek.
 - `cache/redis.ts` Redis client lifecycle'inin tek sahibi olacak.
 - `auth/*` dosyalari bu bootstrap planinda sadece middleware/config hook'lari olarak ele alinacak.
 - `logger` katmani structured logger ve HTTP request logging sorumlulugunu tasiyacak.
