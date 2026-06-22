@@ -143,7 +143,7 @@ Enumlar:
 ```text
 performance_target_scope_type:
   UNIVERSITY
-  ACADEMIC_TOP_UNIT
+  ACADEMIC_UNIT
   DEPARTMENT
   DISCIPLINE
   USER
@@ -316,7 +316,6 @@ create_incentive_term -> replace with term_processes(process_type = INCENTIVE)
 
 ## Deferred Decisions
 
-- `academic_units` tablosu `academic_top_units` olarak yeniden adlandirilacak mi?
 - `incentive_process_details` ilk migration setine dahil edilecek mi, yoksa tesvik tablolarina gecilirken mi eklenecek?
 - Process status gecisleri icin servis seviyesinde state machine helper yazilacak mi?
 - Aylik performans hesaplama run'lari icin scheduler/outbox ilk versiyonda olacak mi, yoksa manuel tetikleme ile mi baslanacak?

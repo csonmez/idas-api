@@ -240,9 +240,9 @@ Yapilacaklar:
 3. Production oncesi rename gerekiyorsa migration planlansin.
 4. Akademik organizasyon route/service/repository yapisi users moduluyle ayni pattern'i izlesin.
 
-Open decision:
+Resolved decision:
 
-- `academic_units` kalacak mi, yoksa `academic_top_units` gibi daha acik bir isim mi kullanilacak?
+- `academic_units` kalacak; `academic_top_units` veya `ACADEMIC_TOP_UNIT` kullanilmayacak.
 
 ## Phase 3: Authorization Architecture
 
@@ -457,7 +457,6 @@ Not: `npm run check` Biome'i `--write` ile calistirir; CI icin ayrica write yapm
 ## Open Decisions
 
 - API prefix gelecekte versioned olacak mi? Ornek: `/api/v1`.
-- `academic_units` ismi korunacak mi, yoksa `academic_top_units` gibi daha acik bir isim mi kullanilacak?
 - Public/API-key tabanli machine-to-machine API olacak mi, yoksa sadece browser session modeli mi kalacak?
 - Authorization permission string format standardi ne olacak? Ornek: `resource:action`.
 - Cursor pagination icin standart cursor encoding formati ne olacak?
