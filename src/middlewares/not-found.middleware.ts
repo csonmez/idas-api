@@ -1,9 +1,6 @@
 import type { Request, Response } from 'express'
+import { sendError } from '../http/errors.ts'
 
 export const notFoundHandler = (_req: Request, res: Response) => {
-	res.status(404).json({
-		error: 'NOT_FOUND',
-		message: 'Not found',
-		details: {}
-	})
+	sendError(res, 404, 'NOT_FOUND', 'Not found')
 }

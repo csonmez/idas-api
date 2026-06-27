@@ -3,6 +3,7 @@ import passport from 'passport'
 import type { AppDependencies } from './app.types.ts'
 import { createCsrfMiddleware } from './auth/csrf.ts'
 import { createSessionMiddleware } from './auth/session.ts'
+import { sendError } from './http/errors.ts'
 import { httpLogger } from './logger/http-logger.ts'
 import { errorHandler } from './middlewares/error.middleware.ts'
 import { notFoundHandler } from './middlewares/not-found.middleware.ts'
@@ -18,7 +19,7 @@ const URLENCODED_BODY_LIMIT = '100kb'
 const createReadinessHandler = (deps: AppDependencies) => {
 	return async (_req: express.Request, res: express.Response) => {
 		if (!deps.isReady()) {
-			res.status(503).end()
+			sendError(res, 503, 'SERVICE_UNAVAILABLE', 'Service unavailable')
 			return
 		}
 
@@ -26,7 +27,7 @@ const createReadinessHandler = (deps: AppDependencies) => {
 			await Promise.all([deps.checkDb(), deps.checkRedis()])
 			res.status(204).end()
 		} catch {
-			res.status(503).end()
+			sendError(res, 503, 'SERVICE_UNAVAILABLE', 'Service unavailable')
 		}
 	}
 }

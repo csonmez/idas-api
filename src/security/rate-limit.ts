@@ -1,5 +1,7 @@
+import type { NextFunction, Request, Response } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { RedisStore } from 'rate-limit-redis'
+import { AppError, sendError } from '../http/errors.ts'
 import type { RedisClient } from '../redis/client.ts'
 
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1_000
@@ -12,12 +14,8 @@ export const createApiRateLimit = (redisClient: RedisClient, isProduction: boole
 		standardHeaders: true,
 		legacyHeaders: false,
 		skip: (req: { method: string }) => req.method === 'OPTIONS',
-		handler: (_req: unknown, res: { status: (code: number) => { json: (body: unknown) => void } }) => {
-			res.status(429).json({
-				error: 'TOO_MANY_REQUESTS',
-				message: 'Too many requests',
-				details: {}
-			})
+		handler: (_req: Request, res: Response) => {
+			sendError(res, 429, 'TOO_MANY_REQUESTS', 'Too many requests')
 		}
 	}
 
@@ -25,32 +23,21 @@ export const createApiRateLimit = (redisClient: RedisClient, isProduction: boole
 		return rateLimit(commonOptions)
 	}
 
-	return rateLimit({
+	const limiter = rateLimit({
 		...commonOptions,
-		passOnStoreError: true,
+		passOnStoreError: false,
 		store: new RedisStore({
 			sendCommand: (...args: string[]) => redisClient.sendCommand(args)
-		}),
-		handler: (
-			_req: unknown,
-			res: { status: (code: number) => { json: (body: unknown) => void } },
-			_next: unknown,
-			options: { message?: string }
-		) => {
-			if (options.message?.includes('store')) {
-				res.status(503).json({
-					error: 'SERVICE_UNAVAILABLE',
-					message: 'Service unavailable',
-					details: {}
-				})
+		})
+	})
+
+	return (req: Request, res: Response, next: NextFunction) => {
+		limiter(req, res, (err?: unknown) => {
+			if (err instanceof Error) {
+				next(new AppError('SERVICE_UNAVAILABLE', 'Service unavailable'))
 				return
 			}
-
-			res.status(429).json({
-				error: 'TOO_MANY_REQUESTS',
-				message: 'Too many requests',
-				details: {}
-			})
-		}
-	})
+			next(err)
+		})
+	}
 }

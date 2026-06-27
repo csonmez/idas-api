@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import type { NextFunction, Request, Response } from 'express'
 import type { AppDependencies } from '../app.types.ts'
+import { sendError } from '../http/errors.ts'
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 const CSRF_TOKEN_PATH = '/csrf-token'
@@ -36,11 +37,7 @@ export const createCsrfMiddleware = (deps: AppDependencies) => {
 			return
 		}
 
-		res.status(403).json({
-			error: 'FORBIDDEN',
-			message: 'Invalid CSRF token',
-			details: {}
-		})
+		sendError(res, 403, 'FORBIDDEN', 'Invalid CSRF token')
 	}
 }
 
