@@ -106,7 +106,7 @@ Kesin effective grant matrisini target scope turlerine gore gorsellestirir.
 
 - Parent scope inheritance bu matris disina cikmaz.
 - Deny veya negative permission yoktur.
-- Ileride `exactScopeOnly` eklenirse explicit opsiyon olmalidir.
+- `exactScopeOnly` bu fazda implemente edilmez; inheritance default'tur. Ileride eklenirse explicit opsiyon olmalidir.
 
 ### Acceptance criteria
 

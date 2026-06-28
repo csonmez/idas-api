@@ -105,6 +105,6 @@ sequenceDiagram
 6. Allow ise handler calisir.
 7. Deny ise 403 doner.
 
-### Target bulunamama notu
+### Target bulunamama notu (Resolved)
 
-Kaynaklarda target bulunamazsa `NOT_FOUND` mu yoksa `FORBIDDEN` mi donulecegi kesin degildir. Implementation oncesi Composer bunu acik soru olarak raporlamalidir. Guvenli dar varsayim, authorization middleware'in handler'i calistirmadan `FORBIDDEN` donmesidir; resource existence contract'i domain handler/service seviyesinde ayrica tasarlanabilir.
+Target bulunamaz veya soft-deleted ise authorization middleware handler'i calistirmadan `FORBIDDEN` 403 doner. "Yok" ve "var ama yetkisiz" ayni 403 ile donerek varlik bilgisini sizdirmaz (enumeration oracle engellenir). Resource existence contract'i gerekiyorsa authz gectikten sonra domain handler/service seviyesinde ele alinir.

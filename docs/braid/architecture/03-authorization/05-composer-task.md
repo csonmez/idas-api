@@ -64,6 +64,17 @@ Kodlamadan once ozellikle su gercekleri raporla:
 - `departments.academicUnitId`, `disciplines.departmentId` ve `disciplines.academicUnitId` parent scope resolution icin kullanilir.
 - Session payload minimum user id tasir; role/permission snapshot'i session'a yazilmamalidir.
 
+## Çözülmüş Kararlar
+
+Bu kararlar sabittir; composer yeniden sormaz:
+
+1. `requirePermission(permission)` yalnizca `scopeType = GLOBAL` grant kabul eder. Scoped grant (ACADEMIC_UNIT/DEPARTMENT/DISCIPLINE) scope'suz endpoint'i karsilamaz. Scoped erisim `requireScopedPermission` ile yapilir.
+2. Target (akademik organizasyon kaydi) bulunamaz veya soft-deleted ise middleware `FORBIDDEN` 403 doner; "yok/yetkisiz" ayrimi status ile sizdirilmaz.
+3. `req.user` icin global `Express.User` type augmentation yapilir ve sahibi bu authorization fazidir. Sekil `deserializeUser`'in sectigi alanlarla birebir olmalidir: `{ id: string; status: 'ACTIVE' | 'INACTIVE' }`. Cast (`as {...}`) yerine augmentation kullanilir.
+4. Permission stringleri tipli sabit (`Permission` union/const) olarak tanimlanir; runtime format validation eklenmez (developer contract). Exact match + safe-deny korunur.
+5. Aktif grant tarih filtreleri injected clock ile yapilir: app `now`'i hesaplar (`Date`), repository query'sine parametre olarak gecirilir; SQL `now()` kullanilmaz. Tek `now` ile hem grant cozulur hem tarih karsilastirilir; bu deterministik test (sabit `now` enjekte) saglar.
+6. `exactScopeOnly` bu fazda implemente edilmez; inheritance default'tur. Sadece options tipinde forward-compat alani olarak yer alabilir.
+
 ## Implementasyon Kuralları
 
 - Yalnizca Authorization Foundation fazini uygula.
@@ -133,7 +144,7 @@ Bu kararlari degistirme veya yeniden yorumlama.
 - `DEPARTMENT`: aktif `departments` kaydi okunur; parent `academicUnitId` `departments.academicUnitId` kolonundan gelir.
 - `DISCIPLINE`: aktif `disciplines` kaydi okunur; parent `departmentId` ve `academicUnitId` `disciplines` tablosundan gelir.
 - Soft-deleted academic organization target'lari aktif target olarak kabul edilmemelidir.
-- Target bulunamazsa `FORBIDDEN` mi `NOT_FOUND` mi donulecegi kaynaklarda kesin degildir; implementasyon oncesi raporla ve dar kapsamli karar ver.
+- Target bulunamazsa (yok veya soft-deleted) middleware `FORBIDDEN` 403 doner; "yok/yetkisiz" ayrimini status ile sizdirmaz. Canonical `NOT_FOUND` gereken yer olursa authz gectikten sonra handler/service seviyesinde ele alinir.
 
 ## Test Kuralları
 

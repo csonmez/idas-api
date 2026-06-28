@@ -129,8 +129,9 @@ requireScopedPermission(options)
 - Once authentication gerektirir.
 - `permission` string exact match ile aranir.
 - Permission string formati `resource:action`; iki parca da lower-kebab-case olmalidir.
-- Scope gerektirmeyen global endpointler icin kullanilir.
-- Global permission kontrolunde target scope yoktur; en az bir aktif grant'in `permissions` array'i exact permission icermelidir. Bu noktada `scopeType` ayrimi uygulanacaksa kaynaklarda net degildir; onerilen dar davranis, scope gerektirmeyen endpointlerde herhangi bir aktif grant'teki permission union'ini kabul etmektir. Endpoint gercekten global-only ise `requireScopedPermission` veya ileride explicit option ile netlestirilmelidir.
+- Scope gerektirmeyen global endpointler icin kullanilir. "Scope gerektirmeyen endpoint" = request'te hedef id/scope tasimayan, sistem genelinde is yapan endpoint (orn. `GET /api/users` tum kullanicilari listeler).
+- Resolved: `requirePermission(permission)` yalnizca `scopeType = GLOBAL` grant kabul eder. Aktif bir GLOBAL grant'in `permissions` array'i exact permission'i icermelidir. Scoped grant'ler (`ACADEMIC_UNIT`, `DEPARTMENT`, `DISCIPLINE`) scope'suz bir endpoint'i karsilamaz; aksi halde dar yetkili kullanici global yuzeyde tum kayitlara erisir (cross-scope privilege escalation).
+- Belirli bir fakulte/bolum/ABD'ye ait kayitlara erisim global endpoint ile degil, hedef tasiyan `requireScopedPermission` ile (veya cikti verisini kullanicinin scope'una gore filtreleyen bir endpoint ile) saglanir.
 
 `requireScopedPermission(options)` icin kavramlar:
 
@@ -231,11 +232,11 @@ Bu imza implementasyon oncesi `@types/express` 5.0.6, Passport typing ve mevcut 
 - Resolved path: `{ academicUnitId, departmentId, disciplineId: targetId }`.
 - Effective grant'ler: `GLOBAL`, parent `ACADEMIC_UNIT`, parent `DEPARTMENT`, ayni `DISCIPLINE`.
 
-Target bulunamazsa:
+Target bulunamazsa (Resolved):
 
-- Kaynaklarda kesin karar yoktur.
-- Guvenlik acisindan authorization middleware'in target yoklugunda resource varligini sizdirip sizdirmeyecegi endpoint bazinda tasarlanmalidir.
-- Onerilen ilk davranis: `requireScopedPermission` target parent cozumunu yapamadiginda `FORBIDDEN` donsun ve domain handler calismasin; resource detail endpointlerinde canonical `NOT_FOUND` ihtiyaci varsa handler/service seviyesinde ayrica ele alinsin. Bu karar implementation oncesi raporlanmalidir.
+- `requireScopedPermission` target parent scope cozumunu yapamadiginda (target yok veya soft-deleted) `FORBIDDEN` 403 doner ve domain handler calismaz.
+- Gerekce: "yok" icin 404, "var ama yetkisiz" icin 403 donmek, yetkisiz kullaniciya kaynak varligini sizdiran bir enumeration oracle yaratir. Iki durum da ayni 403 ile donerek varlik bilgisini gizler. Bu, auth-login'deki "tum login failure'lari generic 401" karariyla ayni ilkedir.
+- Bir endpoint authz gectikten sonra canonical `NOT_FOUND` istiyorsa bu handler/service seviyesinde ele alinir; middleware'in default davranisi 403'tur.
 
 ## Error Davranışı
 
@@ -300,7 +301,7 @@ Bu fazda yapilmayacaklar:
 
 1. Auth olmayan request 401 `UNAUTHENTICATED` dondurur.
 2. Auth olan ama permission bulunmayan request 403 `FORBIDDEN` dondurur.
-3. Global permission scope gerektirmeyen endpointte calisir.
+3. `requirePermission` GLOBAL grant ile scope gerektirmeyen endpointte calisir.
 4. GLOBAL grant butun scoped target'larda gecerlidir.
 5. ACADEMIC_UNIT grant ayni unit ve alt department/discipline icin gecerlidir.
 6. ACADEMIC_UNIT grant baska unit hedefinde gecerli degildir.
@@ -316,6 +317,7 @@ Bu fazda yapilmayacaklar:
 16. Error responses nested contract kullanir.
 17. Internal DB details client'a sizmaz.
 18. Typecheck, test ve ilgili Biome kontrolleri temizdir.
+19. `requirePermission` scoped grant'i scope'suz endpointte kabul etmez; bu durumda 403 `FORBIDDEN` doner.
 
 ## Riskler
 
@@ -331,10 +333,12 @@ Bu fazda yapilmayacaklar:
 - Route param target id dogrulanmadan kullanilirsa authorization bypass veya 500 riski dogar.
 - Target bulunamadiginda 403/404 davranisi bilgi sizmasina neden olabilir.
 
-## Açık Sorular ve Çelişkiler
+## Çözülmüş Kararlar
 
-- Mevcut schema'da ayri `roles`, `permissions` veya `user_roles` tablolari yoktur; kaynak istekteki bu tablo arastirmasi mevcut modelde `rolePermissions.permissions[]` olarak karsilik bulur.
-- `requirePermission(permission)` scope gerektirmeyen endpointte herhangi bir aktif scoped grant'i kabul etmeli mi, yoksa yalnizca `GLOBAL` grant mi kabul etmeli? Kaynaklar bunu net ayirmiyor.
-- Target bulunamadiginda middleware `FORBIDDEN` mi dondurmeli, yoksa handler/service `NOT_FOUND` uretmeli mi? Kaynaklar kesin karar vermiyor.
-- `req.user` icin global Express/Passport type augmentation yapilip yapilmayacagi kaynaklarda net degildir; mevcut proje sade Express tipleri kullanir.
-- `exactScopeOnly` ileride explicit opsiyon olarak eklenebilir; ilk implementasyonda zorunlu degildir.
+- Mevcut schema'da ayri `roles`, `permissions` veya `user_roles` tablolari yoktur; yetki modeli `rolePermissions.permissions[]` uzerinden okunur. (Schema gercegi.)
+- `requirePermission(permission)` yalnizca `GLOBAL` grant kabul eder; scoped grant scope'suz endpoint'i karsilamaz. Scoped erisim `requireScopedPermission` ile yapilir.
+- Target bulunamaz veya soft-deleted ise middleware `FORBIDDEN` 403 doner; "yok/yetkisiz" ayrimi status ile sizdirilmaz.
+- `req.user` icin global `Express.User` type augmentation yapilir; sahibi bu authorization fazidir. Sekil `deserializeUser` ciktisiyla birebir: `{ id: string; status: 'ACTIVE' | 'INACTIVE' }`. Cast (`as {...}`) yerine augmentation kullanilir.
+- Permission stringleri tipli sabit (`Permission` union/const) olarak tanimlanir; runtime format validation yok (developer contract). Exact match + safe-deny korunur.
+- Aktif grant tarih filtreleri injected clock ile yapilir: app `now`'i hesaplar (`Date`) ve repository query'sine parametre olarak gecirir; SQL `now()` kullanilmaz. Tek `now` ile hem grant cozulur hem tarih karsilastirilir; deterministik test icin sabit `now` enjekte edilebilir.
+- `exactScopeOnly` bu fazda implemente edilmez; inheritance default'tur. Sadece options tipinde forward-compat alani olarak yer alabilir.
