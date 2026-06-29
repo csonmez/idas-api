@@ -1,4 +1,4 @@
-import { Kysely, PostgresDialect } from 'kysely'
+import { CamelCasePlugin, Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolConfig } from 'pg'
 import type { DB } from './db.generated.ts'
 
@@ -17,6 +17,7 @@ export const createDb = (connectionString: string, poolConfig: DbPoolConfig = DE
 				...poolConfig,
 				connectionString
 			})
-		})
+		}),
+		plugins: [new CamelCasePlugin()]
 	})
 }
