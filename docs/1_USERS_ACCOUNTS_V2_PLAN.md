@@ -134,8 +134,8 @@ Notlar:
   - `failed_login_count` sifirlanir.
   - `locked_until` temizlenir.
 10. Hatali login sonrasi:
-  - `failed_login_count` artirilir.
-  - 5 hatali denemeden sonra `locked_until = now + 15 minutes` set edilir.
+  - Aktif lock penceresi yoksa `failed_login_count` artirilir.
+  - 5. hatali denemede `locked_until = now + 15 minutes` set edilir. Esik semantigi `failed_login_count >= 5` lock anlamina gelir.
 
 Kilitliyken gelen login denemelerinde:
 
@@ -143,6 +143,18 @@ Kilitliyken gelen login denemelerinde:
 - `failed_login_count` artirilmaz.
 - `locked_until` uzatilmaz.
 - Generic login hatasi donulur.
+
+Lock suresi dolduktan sonra gelen login denemelerinde:
+
+- `locked_until <= now` eski lock penceresinin bittigi anlamina gelir.
+- Ilk basarisiz deneme eski `failed_login_count` degeri uzerinden devam etmez.
+- Yeni failure penceresi `failed_login_count = 1`, `locked_until = null` ile baslatilir.
+
+Concurrency ve transaction kurali:
+
+- `bcrypt.compare` hicbir DB transaction veya row lock icinde calistirilmaz.
+- Credential ve lock state okunur, bcrypt/dummy compare transaction disinda calisir, sadece sonuc state mutation'i atomik SQL `UPDATE`/upsert ile yazilir.
+- CPU-bound hash suresi boyunca DB row lock'u veya connection tutulmaz.
 
 Kullaniciya donen login hata mesaji tum bu failure durumlari icin generic olacak:
 
@@ -164,22 +176,29 @@ Boylece "user var ama parola kurmamis", "passive user", "credential kaydi yok" g
 8. `expires_at = now + 1 hour` set edilir.
 9. Email linkinde raw token gonderilir.
 
+Timing oracle notu:
+
+- Forgot password endpoint'i user var/yok bilgisini response govdesi disinda belirgin response suresi farkiyla da sizdirmamalidir.
+- User varsa token uretimi, DB write ve email enqueue; user yoksa hicbir sey yapmama gibi hizli path gozlemlenebilir email enumeration'a donusebilir.
+- Tercih edilen yaklasim dis response'u generic `204` olarak hizlica dondurmek ve token/email isini async queue/job ile yapmak; queue yoksa user var/yok dallarinin benzer operasyonel maliyet ve rate limit davranisina sahip olmasini saglamaktir.
+
 ### Password Set / Reset
 
 1. Gelen raw token SHA-256 hex digest'e cevrilir.
-2. Transaction icinde `password_reset_tokens.token_hash` ile token kaydi bulunur ve row lock alinir.
+2. Token kaydi `password_reset_tokens.token_hash` ile bulunur ve expire/user status kontrolleri yapilir.
 3. Token yoksa veya expire olduysa islem reddedilir.
 4. Token'in bagli oldugu user aktif degilse islem reddedilir.
-5. Yeni parola bcrypt ile hashlenir.
-6. `user_credentials` icin DB-level upsert calisir:
+5. Yeni parola bcrypt ile transaction/row lock disinda hashlenir.
+6. Kisa bir transaction icinde token tekrar row lock ile okunur ve halen mevcut/expire olmamis/user aktif ise devam edilir.
+7. `user_credentials` icin DB-level upsert calisir:
   - `password_hash`
   - `password_changed_at`
   - `failed_login_count = 0`
   - `locked_until = null`
-7. User'a ait aktif Redis session'lar invalidate edilir.
-8. Token kaydi hard delete edilir.
+8. User'a ait aktif Redis session'lar invalidate edilir.
+9. Token kaydi hard delete edilir.
 
-Credential upsert app seviyesinde `find -> create/update` olarak yapilmayacak. `user_credentials.user_id` unique constraint uzerinden atomic DB upsert kullanilacak.
+Credential upsert app seviyesinde `find -> create/update` olarak yapilmayacak. `user_credentials.user_id` unique constraint uzerinden atomic DB upsert kullanilacak. Bcrypt hash CPU-bound oldugu icin token row lock'u veya DB connection'i hash suresi boyunca tutulmayacak; token kullanimi ve credential mutation kisa transaction icinde atomiklestirilecek.
 
 ## API / Service Degisiklikleri
 
@@ -262,6 +281,7 @@ Islem:
 - Credential kaydi olmayan user login olamamali.
 - Tum login failure durumlari generic hata mesaji dondurmeli.
 - Forgot password mevcut aktif user icin credential kaydi olusturmamali.
+- Forgot password user var/yok dallarinda belirgin timing oracle uretmemeli.
 - Forgot password `password_reset_tokens` icine token hash ve expiry yazmali.
 - Forgot password token TTL'i 1 saat olmali.
 - Forgot password IP bazli rate limit'i asmamali.
@@ -283,7 +303,9 @@ Islem:
 - Basarili login `last_login_at` guncellemeli.
 - Basarili login `failed_login_count` ve `locked_until` alanlarini temizlemeli.
 - Hatali login `failed_login_count` artirmali.
-- 5 hatali login sonrasi `locked_until` set edilmeli.
+- 5. hatali login denemesinde `locked_until` set edilmeli.
+- Lock suresi dolduktan sonraki ilk basarisiz deneme yeni failure penceresini `failed_login_count = 1` ile baslatmali.
+- Bcrypt compare DB transaction/row lock disinda calismali; sadece state mutation atomik update ile yapilmali.
 - Lock suresi dolmadan dogru parola girilse bile login reddedilmeli.
 - Lock suresi icindeki login denemeleri `failed_login_count` artirmamali ve lock suresini uzatmamali.
 - `INACTIVE` user login olamamali.
