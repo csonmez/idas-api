@@ -35,13 +35,13 @@ const createReadinessHandler = (deps: AppDependencies) => {
 export const createApp = (deps: AppDependencies) => {
 	const app = express()
 
-	app.set('trust proxy', deps.config.isProduction ? 1 : false)
+	app.set('trust proxy', deps.config.auth.trustProxyHops)
 	app.disable('x-powered-by')
 
 	app.use(requestIdMiddleware)
 	app.use(httpLogger)
 	app.use(createHelmetMiddleware())
-	app.use(createCorsMiddleware())
+	app.use(createCorsMiddleware(deps.config.auth.corsAllowedOrigins))
 
 	app.get('/health/live', (_req, res) => res.status(204).end())
 	app.get('/health/ready', createReadinessHandler(deps))

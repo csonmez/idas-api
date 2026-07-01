@@ -589,9 +589,22 @@ describe('AUTH-024: Test routes are not added to production router', () => {
 		app.use(
 			'/api',
 			createRoutes({
-				config: {} as never,
+				config: {
+					auth: {
+						rateLimit: {
+							session: { windowMs: 900_000, ipEmailMax: 5, ipMax: 50 },
+							resetRequest: { windowMs: 3_600_000, ipEmailMax: 3, ipMax: 20 },
+							resetCompletion: { windowMs: 900_000, ipRouteMax: 10 }
+						}
+					}
+				} as never,
 				db: {} as never,
-				redisClient: {} as never,
+				redisClient: {
+					sendCommand: async (args: string[]) => {
+						if (args[0] === 'SCRIPT') return 'mock-sha'
+						return null
+					}
+				} as never,
 				isReady: () => true,
 				checkDb: async () => undefined,
 				checkRedis: async () => undefined

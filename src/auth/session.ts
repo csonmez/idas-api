@@ -3,13 +3,7 @@ import session from 'express-session'
 import type { AppDependencies } from '../app.types.ts'
 import type { RedisClient } from '../redis/client.ts'
 
-declare module 'express-session' {
-	interface SessionData {
-		csrfToken?: string
-	}
-}
-
-const SESSION_STORE_PREFIX = 'sess:'
+const SESSION_STORE_PREFIX = 'idas:sess:'
 
 export const createSessionMiddleware = (deps: AppDependencies) => {
 	const store = new RedisStore({

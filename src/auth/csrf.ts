@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import type { NextFunction, Request, Response } from 'express'
 import type { AppDependencies } from '../app.types.ts'
 import { sendError } from '../http/errors.ts'
@@ -8,6 +8,13 @@ const CSRF_TOKEN_PATH = '/csrf-token'
 
 const createCsrfToken = () => {
 	return randomBytes(32).toString('hex')
+}
+
+const constantTimeCompare = (a: string, b: string): boolean => {
+	const bufA = Buffer.from(a)
+	const bufB = Buffer.from(b)
+	if (bufA.length !== bufB.length) return false
+	return timingSafeEqual(bufA, bufB)
 }
 
 export const createCsrfMiddleware = (deps: AppDependencies) => {
@@ -31,7 +38,8 @@ export const createCsrfMiddleware = (deps: AppDependencies) => {
 			typeof sessionToken === 'string' &&
 			typeof headerToken === 'string' &&
 			sessionToken.length > 0 &&
-			headerToken === sessionToken
+			headerToken.length > 0 &&
+			constantTimeCompare(headerToken, sessionToken)
 		) {
 			next()
 			return

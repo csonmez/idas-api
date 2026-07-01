@@ -24,14 +24,32 @@ const createTestConfig = (): AppConfig => ({
 		sessionMaxAgeMs: 86_400_000,
 		sessionCookieSecure: false,
 		sessionCookieSameSite: 'lax',
-		csrfHeaderName: 'x-csrf-token'
+		csrfHeaderName: 'x-csrf-token',
+		bcryptRounds: 12,
+		passwordMinLength: 15,
+		corsAllowedOrigins: ['http://localhost:3000'],
+		passwordResetUrl: 'http://localhost:3000/reset',
+		trustProxyHops: 0,
+		rateLimit: {
+			session: { windowMs: 900_000, ipEmailMax: 5, ipMax: 50 },
+			resetRequest: { windowMs: 3_600_000, ipEmailMax: 3, ipMax: 20 },
+			resetCompletion: { windowMs: 900_000, ipRouteMax: 10 }
+		}
 	}
 })
+
+const createTestRedisClient = (): RedisClient =>
+	({
+		sendCommand: async (args: string[]) => {
+			if (args[0] === 'SCRIPT') return 'mock-sha'
+			return null
+		}
+	}) as unknown as RedisClient
 
 const createTestDeps = (overrides: Partial<AppDependencies> = {}): AppDependencies => ({
 	config: createTestConfig(),
 	db: {} as AppDependencies['db'],
-	redisClient: {} as RedisClient,
+	redisClient: createTestRedisClient(),
 	isReady: () => true,
 	checkDb: async () => undefined,
 	checkRedis: async () => undefined,

@@ -8,6 +8,29 @@ Mevcut projede `express-session`, `connect-redis`, `passport`, Redis client, CSR
 
 `connect-redis` kullanılmaya devam edilmeli. `passport-redis` bu proje için önerilmiyor; Passport session persistence zaten `express-session` store üzerinden çözülüyor. `passport-redis` daha çok Passport'a özel ek session/cache stratejileri için değerlendirilebilir, fakat burada ihtiyaç net değil ve fazladan coupling yaratır.
 
+## Implementasyon Öncesi Kilit Kararlar
+
+Bu plan uygulanmaya başlanmadan önce aşağıdaki kararlar implementasyon kontratı olarak sabitlenir:
+
+1. `POST /api/account/session` başarılı login response'u yeni authenticated session'a ait `csrfToken` döner. Client login sonrası ek `GET /api/csrf-token` çağırmak zorunda değildir. Pre-login CSRF token login sonrası mutating endpointlerde geçerli kabul edilmez.
+2. `POST /api/account/password-reset-token-verifications` ilk fazda uygulanmaz. Reset token doğrulaması sadece `POST /api/account/password-resets` içinde yapılır. Ürün UX'i ayrı token pre-check gerektirirse endpoint sonraki fazda generic failure, sıkı rate limit ve no-raw-token logging kurallarıyla eklenebilir.
+3. Account/auth-specific limiter ilk faz default değerleri açıkça tanımlanır ve test edilir:
+  - Session creation: IP + normalized email digest için `5 attempt / 15 minutes`; ayrıca IP bazlı kaba koruma için `50 attempt / 15 minutes`.
+  - Password reset request: IP + normalized email digest için `3 request / 1 hour`; ayrıca IP bazlı kaba koruma için `20 request / 1 hour`.
+  - Password reset completion: IP + route için `10 request / 15 minutes`.
+  - Production store hatasında credential brute force yüzeyinde fail-closed davranılır.
+  - IP bazlı rate limit `req.ip`'nin gerçek client IP'sini yansıttığını varsayar; bu, `app.set('trust proxy', ...)` değerinin deployment proxy topolojisine göre ayarlanmasını önkoşul kılar. Tek hop'lı proxy (ör. sadece nginx) için `trust proxy: 1` yeterlidir; çok hop'lı topolojide (ör. CDN + nginx) doğru hop sayısı veya güvenilir proxy IP listesi ayarlanmazsa tüm trafik tek IP altında toplanır ve IP bazlı limit anlamsızlaşır. Proxy topolojisi ve `trust proxy` değeri deploy öncesi netleştirilmelidir; netleşene kadar IP bazlı limit değerlerinin yanıltıcı olabileceği bilinmelidir.
+4. Redis session prefix kararı Phase 1/2'de uygulanır: mevcut `sess:` yerine auth v2 başlangıcında tek seferde `idas:sess:` kullanılacaktır. Henüz prod session olmadığı varsayımıyla ayrı migration/session-killing fazı planlanmaz; user-session index de ilk günden `idas:sess:<sid>` store key'lerini tutar.
+5. Account limiter Redis keyspace'i global `/api` limiter'dan ayrılır. Global limiter default `rate-limit-redis` prefix'ini kullanabilir; account limiter'lar `idas:rl:account:*` gibi explicit prefix ile IP, emailDigest ve route key'lerini izole eder.
+6. Password hashing bağımlılığı Phase 1'de kilitlenir. Deploy/CI uyumluluğu öncelikliyse varsayılan tercih `bcryptjs` olur; native `bcrypt` seçilecekse Docker/CI base image üzerinde prebuilt binary veya build toolchain doğrulanmadan Phase 1 tamamlanmış sayılmaz.
+7. Password reset email gönderimi account service'e gömülmez. İlk fazda bile `NotificationAdapter` / `PasswordResetNotifier` benzeri bir interface üzerinden yapılır; gerçek provider hazır değilse test/dev için fake adapter kullanılır.
+8. `configurePassport` idempotency stratejisi Phase 1'de çözülür. Tercih edilen yaklaşım module-level guard ile strategy/serializer tekrar register edilmesini engellemektir; alternatif olarak app bootstrap'ın tek çağrı garantisi testle ispatlanmalıdır.
+9. Redis session invalidation failure policy net kabul edilir:
+  - Logout sırasında session destroy başarılı ama index cleanup başarısızsa 204 dönebilir; cleanup hatası structured log/metric ile izlenir ve sonraki invalidation sırasında stale cleanup best-effort yapılır.
+  - Password reset/password change sonrası active session invalidation başarısız olursa use-case security-complete kabul edilmez; ilk fazda hard failure döner ve password reset transaction'ı invalidation başarılı olmadan tamamlanmış sayılmaz.
+  - User status `ACTIVE → INACTIVE` değişimi sonrası aktif session invalidation başarısız olursa aynı güvenlik-complete kontratı geçerlidir; invalidasyon hook'u hard failure döner. User'ı `INACTIVE` yapan user-management/admin endpoint'inin kendisi bu planın kapsamında değildir; plan yalnızca invalidasyon mekanizmasını (user-session index'i) ve failure policy'yi tanımlar, ilgili endpoint bu hook'u çağırmalıdır.
+10. Mevcut test altyapısı `tsx --test src/**/*.test.ts` / Node test runner pattern'iyle devam eder. Vitest'e geçiş bu planın kapsamında değildir.
+
 ## İnceleme Bulguları
 
 
@@ -129,7 +152,7 @@ Gerekçe:
 Önerilen yaklaşım:
 
 - Session sadece user id ve CSRF gibi session state tutsun.
-- `deserializeUser` veya `getCurrentUser` authorization için gereken güncel role/scope özetini DB'den okusun.
+- `deserializeUser` sadece minimal user payload'ını yüklesin; authorization için gereken güncel role/scope özeti `getCurrentUser`/authorization service gibi route/use-case seviyesindeki okumalarda DB'den alınsın.
 - Performans ihtiyacı doğarsa affiliation/scope bilgisi session'a değil, kısa TTL'li ve explicit invalidation destekli ayrı bir cache'e konulsun.
 - User affiliation veya role değiştiğinde ilgili kullanıcının aktif session'ları invalidate edilebilsin.
 
@@ -148,6 +171,10 @@ type AuthenticatedUser = {
   status: 'ACTIVE' | 'INACTIVE'
 }
 ```
+
+Bu tip runtime ile birebir uyumlu olmalıdır. Mevcut `passport.ts` sadece `id` ve `status` seçtiği için Phase 1'de `deserializeUser` query'si `users.email` alanını da seçmelidir veya tipten `email` çıkarılmalıdır. Bu planın tercihi `email` alanını deserialize payload'a dahil etmektir; `req.user.email` response/diagnostic context için kullanılabilir, fakat authorization kararları için role/scope yine ayrıca yüklenmelidir.
+
+LocalStrategy `usernameField: 'email'` ile çalışacağı için Phase 1'de `users.email` canonical login identifier olarak doğrulanmalıdır. `user_credentials` tablosunda email yoktur; credential lookup `users.email` normalize edilmiş input ile bulunup `user_credentials.user_id` join'i üzerinden yapılmalıdır. Generated DB tiplerinde `users.email` mevcut olsa da migration/schema doğrulaması Phase 1 checklist'inin parçasıdır.
 
 `GET /api/account/session` response'u ve authorization middleware'leri ihtiyaç duydukları role/scope özetini ayrıca DB'den veya ileride kısa TTL'li explicit invalidation destekli cache'ten okuyabilir.
 
@@ -198,6 +225,7 @@ Timing oracle önlemi:
 - User yok, user `INACTIVE` veya credential kaydı yok dallarında gerçek credential hash bulunmasa bile aynı cost factor ile üretilmiş sabit bir dummy bcrypt hash'e karşı `bcrypt.compare(password, DUMMY_HASH)` çalıştırılmalı ve sonuç yok sayılmalıdır.
 - Amaç, gerçek credential varlığında çalışan bcrypt maliyetini no-user/no-credential dallarında da çalıştırarak email/account existence bilgisinin yanıt süresinden sızmasını zorlaştırmaktır.
 - `DUMMY_HASH` runtime'da her request'te üretilmemeli; bcrypt rounds `12` ile önceden hesaplanmış sabit, non-secret bir hash olarak modül seviyesinde tutulmalıdır.
+- Eğer password hash cost factor config'ten okunacaksa dummy hash aynı cost factor ile üretilmiş olmalıdır. Gerçek credential hash cost'u ile dummy hash cost'u ayrışırsa no-user/no-credential timing oracle tekrar oluşur; bu nedenle cost factor Phase 1'de sabitlenmeli veya config değiştiğinde dummy hash de aynı değerle güncellenmelidir.
 - Locked account dalında password compare yapılmaması lock uzatma/DoS açısından doğru varsayılandır; tam zamanlama tekdüzeliği istenirse locked dalında da dummy compare çalıştırılabilir. Bu dal yine generic 401 döner ve failed count/lock süresini değiştirmez.
 
 `audience: 'admin'` gibi role-gated session creation istenirse credential doğru ama yetki yoksa `403 FORBIDDEN` dönebilir; yine de response rol detayını sızdırmamalıdır.
@@ -217,6 +245,19 @@ Timing oracle önlemi:
 
 Concurrency için sadece state mutation kısmı atomik olmalı. `bcrypt.compare` hiçbir DB transaction veya row lock içinde çalıştırılmamalıdır; CPU-bound hash süresi boyunca DB row lock'u veya connection tutulmamalı. Önerilen akış: credential ve lock state'i oku, transaction/row-lock dışında bcrypt veya dummy compare çalıştır, ardından sonucu `failed_login_count`, `locked_until` ve `last_login_at` alanlarını atomik güncelleyen tek SQL `UPDATE`/upsert mantığıyla yaz.
 
+Atomik başarısız login update algoritması:
+
+1. Credential ve lock state'i okunur; `locked_until > now` ise compare yapılmadan generic failure döner ve state değiştirilmez.
+2. Lock aktif değilse bcrypt compare transaction/row lock dışında çalıştırılır.
+3. Compare başarısızsa DB tarafında tek atomik `UPDATE ... RETURNING` ile state güncellenir:
+  - `locked_until <= now` veya eski lock süresi bitmişse yeni failure penceresi `failed_login_count = 1`, `locked_until = null` ile başlar.
+  - Aktif pencere devam ediyorsa `failed_login_count = failed_login_count + 1` yapılır.
+  - Yeni count `>= 5` ise `locked_until = now + 15 minutes` set edilir.
+  - Update sonucu yeni `failed_login_count` ve `locked_until` döner; response yine generic 401 kalır.
+4. Compare başarılıysa tek atomik `UPDATE` ile `last_login_at = now`, `failed_login_count = 0`, `locked_until = null` yazılır.
+5. Aynı credential için concurrent başarısız denemelerde sayaç DB tarafında increment edilmelidir; application tarafında okunan eski count'a göre overwrite yapılmamalıdır.
+6. Bu akış Kysely/Postgres implementation'ında `CASE` ifadeleri ve `RETURNING` ile yazılmalı; bcrypt maliyeti hiçbir transaction süresini uzatmamalıdır.
+
 ### 7. Session fixation ve CSRF lifecycle
 
 Başarılı login mevcut anonymous session'ı authenticated session'a çevirmemeli; session id mutlaka rotate edilmelidir.
@@ -231,7 +272,17 @@ Zorunlu login lifecycle:
 6. Authenticated session için yeni CSRF token üretilir.
 7. Client login sonrası mutating request'lerde bu yeni authenticated CSRF token'ı kullanır.
 
-Pre-login CSRF token sadece login request'ini authorize eder; authenticated session CSRF token'ı olarak yeniden kullanılmamalıdır. Login response'u yeni CSRF token'ı dönebilir veya client login sonrası tekrar `GET /api/csrf-token` çağırabilir. Hangi akış seçilirse seçilsin client contract açıkça belgelenmelidir.
+Pre-login CSRF token sadece login request'ini authorize eder; authenticated session CSRF token'ı olarak yeniden kullanılmamalıdır. Login response'u yeni authenticated CSRF token'ı döner; client login sonrası tekrar `GET /api/csrf-token` çağırmak zorunda değildir.
+
+`req.session.regenerate()` callback/Promise sequencing kritik implementation kontratıdır. `req.login()` ve yeni CSRF üretimi regenerate tamamlandıktan sonra, yeni session objesi üzerinde yapılmalıdır. Aksi halde CSRF token eski anonymous session'a yazılıp regenerate sırasında Redis'ten silinebilir. Controller/service helper bu sıralamayı tek yerde sarmalamalı:
+
+```ts
+await regenerateSession(req)
+await loginUser(req, user)
+const csrfToken = issueCsrfToken(req)
+```
+
+Callback API kullanılırsa `req.login()` ve `issueCsrfToken(req)` mutlaka `regenerate` callback'i içinde çağrılmalıdır; callback dışı fire-and-forget kullanım kabul edilmez.
 
 Session regeneration sırasında eski anonymous session'dan veri körlemesine kopyalanmamalıdır. Taşınması gereken alan çıkarsa allowlist ile ve gerekçesiyle taşınmalıdır.
 
@@ -259,14 +310,32 @@ Password reset request timing güvenlik kontratı:
 
 Reset token doğrulama güvenlik kontratı:
 
-- `POST /api/account/password-reset-token-verifications` sadece token geçerliliği için kullanılacaksa valid/invalid/expired/used ayrımı response detaylarında sızdırılmamalıdır.
-- Invalid, expired, deleted veya user'ı inactive token dış response'ta aynı generic failure contract ile ele alınmalıdır.
-- Token verification ve password reset completion endpointleri IP + route bazlı sıkı rate limit altında olmalıdır.
+- İlk fazda ayrı `POST /api/account/password-reset-token-verifications` endpoint'i uygulanmayacaktır; token doğrulaması sadece `POST /api/account/password-resets` completion endpoint'i içinde yapılır.
+- Invalid, expired, deleted, daha önce kullanılmış veya user'ı inactive token dış response'ta aynı generic failure contract ile ele alınmalıdır.
+- Password reset completion endpoint'i IP + route bazlı sıkı rate limit altında olmalıdır.
 - Raw token hiçbir log, metric label, error details veya rate limit key içinde yer almamalıdır.
 - Token hash üretimi canonical tek fonksiyon üzerinden yapılmalı; lookup raw token ile değil hash ile yapılmalıdır.
 - Hash karşılaştırması timing sinyali üretmeyecek şekilde tasarlanmalıdır. DB lookup hash üzerinden yapılacağı için uygulama seviyesinde raw token/string compare gerekiyorsa constant-time compare kullanılmalıdır.
 - Password reset completion sırasında yeni parola bcrypt hash'i token row lock veya DB transaction içinde hesaplanmamalıdır. Token geçerliliği ön kontrol edilir, bcrypt hash transaction dışında üretilir, ardından kısa transaction içinde token tekrar lock'lanıp halen geçerliyse credential upsert + token delete atomik yapılır.
-- Verification endpoint'i ürün ihtiyacı değilse ilk fazda kaldırılıp token kontrolü sadece `POST /api/account/password-resets` içinde yapılabilir; ayrı endpoint kalacaksa yukarıdaki rate limit ve generic response kuralları zorunludur.
+- Race condition kontratı: Ön kontrolde geçerli görünen token, bcrypt hash üretilirken başka request tarafından kullanılır veya silinirse transaction içindeki tekrar kontrol başarısız olur; üretilmiş hash discard edilir ve dışarıya generic failure döner.
+- Ürün UX'i ayrı token pre-check gerektirirse `POST /api/account/password-reset-token-verifications` sonraki fazda eklenebilir; bu endpoint valid/invalid/expired/used ayrımı sızdırmamalı, raw token loglamamalı ve IP + route bazlı sıkı rate limit altında olmalıdır.
+
+Password reset email/notification adapter kontratı:
+
+```ts
+type PasswordResetNotifier = {
+  enqueuePasswordResetEmail(input: {
+    userId: string
+    emailDigest: string
+    resetUrl: string
+  }): Promise<void>
+}
+```
+
+- Account service doğrudan SMTP/provider client'a bağlanmamalı; bu interface dependency olarak inject edilmelidir.
+- `resetUrl` sadece provider'a gönderilecek payload'da bulunmalı; structured log, metric label veya error details içinde raw token içeren URL yazılmamalıdır.
+- Test/dev ortamında fake notifier kullanılabilir; production adapter mail gönderim hatalarını dış response'a yansıtmaz, structured log/metric ile izler.
+- Queue altyapısı yoksa bile controller response'u mail gönderimi tamamlanana kadar beklememeli; notifier enqueue semantiğiyle tasarlanmalıdır.
 
 
 
@@ -287,7 +356,6 @@ REST resource adlandırması için `login`, `logout`, `admin-login`, `forgot-pas
 | `GET`    | `/api/account/session`                            | Aktif session ve kullanıcı auth context özetini döner |
 | `DELETE` | `/api/account/session`                            | Aktif session'ı sonlandırır                           |
 | `POST`   | `/api/account/password-reset-requests`            | İlk parola veya reset token talebi oluşturur          |
-| `POST`   | `/api/account/password-reset-token-verifications` | Reset token geçerliliğini kontrol eder                |
 | `POST`   | `/api/account/password-resets`                    | Token ile parola set/reset işlemini tamamlar          |
 
 
@@ -297,7 +365,8 @@ Notlar:
 - `DELETE /api/account/session`, klasik `logout` action'ının resource karşılığıdır: mevcut session kaynağını siler.
 - `GET /api/account/session`, `/api/me` yerine tercih edilir; dönen kaynak aktif session'ın auth context'idir. İstenirse frontend ergonomisi için daha sonra `/api/users/me` veya `/api/me` ayrı bir user-profile/self-service resource olarak eklenebilir.
 - `password-reset-requests` ve `password-resets` isimleri fiili URL'ye taşımadan account recovery akışını resource olarak ifade eder.
-- Unauthenticated login dahil tüm unsafe account endpointleri CSRF ister. Client login öncesi `GET /api/csrf-token` çağırır, dönen token'ı configured CSRF header ile `POST /api/account/session` isteğinde gönderir. Başarılı login session id rotate ettiği için authenticated session yeni CSRF token kullanmalıdır; login response'u token dönebilir veya client login sonrası tekrar `GET /api/csrf-token` çağırabilir.
+- Ayrı `password-reset-token-verifications` endpoint'i ilk fazda yoktur. Token geçerliliği `POST /api/account/password-resets` içinde doğrulanır. Ürün UX'i ayrı pre-check isterse sonraki fazda aynı generic failure ve rate limit kurallarıyla eklenebilir.
+- Unauthenticated login dahil tüm unsafe account endpointleri CSRF ister. Client login öncesi `GET /api/csrf-token` çağırır, dönen token'ı configured CSRF header ile `POST /api/account/session` isteğinde gönderir. Başarılı login session id rotate ettiği için authenticated session yeni CSRF token kullanır ve bu token login response'unda döner.
 
 
 
@@ -341,15 +410,26 @@ Başarılı session creation ve `GET /api/account/session` response'u password/t
 }
 ```
 
-Login response'u yeni authenticated CSRF token'ı dönecek şekilde tasarlanırsa response şu alanı da içerebilir:
+Login response'u yeni authenticated CSRF token'ı da döner:
 
 ```json
 {
+  "user": {
+    "id": "uuid",
+    "email": "user@example.edu.tr",
+    "name": "Ada",
+    "surname": "Lovelace",
+    "userType": "ACADEMICIAN",
+    "title": "PROFESSOR",
+    "status": "ACTIVE",
+    "roles": [],
+    "affiliations": []
+  },
   "csrfToken": "new-authenticated-session-csrf-token"
 }
 ```
 
-Alternatif olarak login response'u CSRF token dönmez ve client başarılı login sonrası `GET /api/csrf-token` ile yeni token alır. İlk fazda hangi seçenek seçilirse frontend contract ve integration testleri aynı kararı takip etmelidir. Login öncesi kullanılan CSRF token login sonrası mutating endpointlerde geçerli kabul edilmemelidir.
+Client başarılı login sonrası ek `GET /api/csrf-token` çağırmak zorunda değildir. Login öncesi kullanılan CSRF token login sonrası mutating endpointlerde geçerli kabul edilmemelidir.
 
 Session deletion:
 
@@ -381,6 +461,7 @@ src/modules/account/
   password-policy.ts
   password-reset-token.ts
   session-invalidation.ts
+  password-reset-notifier.ts
 ```
 
 Mevcut cross-cutting auth bootstrap dosyaları korunmalı:
@@ -399,6 +480,30 @@ Bu ayrım şu ownership'i sağlar:
 
 Authorization middleware'leri `account` modülünün parçası olmamalı. Authorization ayrı bir katmandır ve `src/modules/authorization/*` altında zaten uygulanmıştır (`requireAuth`, `requirePermission`, `requireScopedPermission`); bkz. `docs/braid/architecture/03-authorization/`. Account modülü hesap oturumu ve parola kurtarma lifecycle'ını yönetir; role/permission enforcement bu katmanın işi değildir.
 
+`GET /api/account/session` ve login response DTO'ları authorization modülünün internal tiplerini doğrudan dışarı sızdırmamalı; account module kendi response DTO'sunu üretmelidir. İlk faz response shape'i:
+
+```ts
+type AccountSessionRole = {
+  id: string
+  role: string
+  scopeType: 'GLOBAL' | 'ACADEMIC_UNIT' | 'DEPARTMENT' | 'DISCIPLINE'
+  academicUnitId: string | null
+  departmentId: string | null
+  disciplineId: string | null
+  permissions: string[]
+}
+
+type AccountSessionAffiliation = {
+  id: string
+  affiliationType: 'PRIMARY' | 'SECONDARY'
+  academicUnitId: string | null
+  departmentId: string | null
+  disciplineId: string | null
+}
+```
+
+Bu DTO'lar canonical permission kararının kaynağı değildir; sadece current session context response'udur. Route authorization kararları yine authorization middleware/service katmanında verilmelidir.
+
 ## Implementation Plan
 
 
@@ -406,55 +511,72 @@ Authorization middleware'leri `account` modülünün parçası olmamalı. Author
 ### Phase 1 — Bootstrap ve tipler
 
 1. `passport-local` ve `@types/passport-local` bağımlılıklarını ekle.
-2. Password hashing implementasyonunu netleştir ve bağımlılığı ekle: native `bcrypt` + `@types/bcrypt` veya deploy/CI uyumluluğu öncelikliyse `bcryptjs`.
-3. `src/types/express.d.ts` veya module augmentation ile `Express.User` ve `express-session` tiplerini tanımla.
-4. `configurePassport` fonksiyonunu LocalStrategy kuracak şekilde genişlet.
-5. App startup içinde `configurePassport({ db })` çağrısının net ve tek yerde yapıldığından emin ol.
-6. `configurePassport` hot reload/test tekrarlarında strategy ve serializer davranışını duplicate register etmeyecek şekilde idempotent olmalı veya bootstrap tarafından tek çağrı garantisi verilmelidir.
+2. Password hashing implementasyonunu netleştir ve bağımlılığı ekle. Varsayılan tercih deploy/CI uyumluluğu için `bcryptjs` olmalıdır. Native `bcrypt` seçilecekse Docker/CI base image üzerinde prebuilt binary veya build toolchain doğrulanmadan bu faz tamamlanmış sayılmaz.
+3. Password hash cost factor'ını ve aynı cost ile üretilmiş `DUMMY_HASH` değerini birlikte sabitle.
+4. `src/types/express.d.ts` veya module augmentation ile `Express.User` ve `express-session` tiplerini tanımla.
+5. `AuthenticatedUser` runtime shape'ini `id`, `email`, `status` olarak netleştir; `deserializeUser` query'si `users.email` alanını da seçmelidir.
+6. `users.email` canonical login identifier ve `user_credentials.user_id` join path'ini migration/generated schema ile doğrula.
+7. `createSessionMiddleware` RedisStore prefix'ini auth v2 başlangıcında `idas:sess:` yap; user-session index aynı store key formatına dayanacağı için bu karar sonraki faza bırakılmamalıdır.
+8. `configurePassport` fonksiyonunu LocalStrategy kuracak şekilde genişlet.
+9. App startup içinde `configurePassport({ db })` çağrısının net ve tek yerde yapıldığından emin ol.
+10. `configurePassport` hot reload/test tekrarlarında strategy ve serializer davranışını duplicate register etmeyecek şekilde idempotent olmalıdır. İlk tercih module-level guard ile aynı process içinde tekrar registration'ı engellemektir; bootstrap single-call garantisi seçilirse bu davranış integration testle ispatlanmalıdır.
 
-Risk: Düşük. Mevcut `passport.ts` zaten bootstrap için ayrılmış. Native `bcrypt` seçilirse CI/Docker build ortamı ayrıca doğrulanmalı.
+Risk: Düşük-orta. Mevcut `passport.ts` bootstrap için ayrılmıştır, ancak password hashing dependency ve Redis prefix kararı erken kilitlenmezse sonraki fazlarda migration/refactor maliyeti doğar.
 
-### Phase 2 — Account module
+### Phase 2a — Account session module
 
-1. `account.schemas.ts` içinde Zod session/password reset schemas oluştur.
+1. `account.schemas.ts` içinde session schemas oluştur.
 2. `account.service.ts` içinde şu use-case'leri yaz:
   - `createSessionWithPassword`
   - `getCurrentSession`
   - `deleteCurrentSession`
-  - `createPasswordResetRequest`
-  - `verifyPasswordResetToken`
-  - `completePasswordReset`
 3. `createSessionWithPassword` başarılı credential sonrası session id rotation yapmalı; eski anonymous session authenticated session'a yükseltilmemeli.
-4. Login sonrası authenticated session için yeni CSRF token üretilmeli veya client'ın login sonrası yeni token alacağı açık contract uygulanmalı.
-5. `session-invalidation.ts` minimal hali Phase 2 içinde eklenmeli:
+4. `req.session.regenerate()` tamamlanmadan `req.login()` veya `issueCsrfToken(req)` çağrılmamalı. Regenerate callback/Promise sırası helper ile tek yerde garanti altına alınmalıdır.
+5. Login sonrası authenticated session için yeni CSRF token üretilmeli ve `POST /api/account/session` response'unda dönmelidir.
+6. `session-invalidation.ts` minimal login/logout hali Phase 2a içinde eklenmeli:
+  - Modül `invalidateUserSessions(userId: string): Promise<void>` imzasını export etmelidir; bu hook `idas:user-sessions:{userId}` set'inden ilgili kullanıcının tüm session store key'lerini siler ve set'i temizler. Password reset (Phase 2b) ve user status `ACTIVE → INACTIVE` değişimi (Phase 3) aynı hook'u çağırır; her iki çağıran da Kilit Karar #9'daki hard-failure kontratına tabidir.
   - Login sonrası final authenticated session key `idas:user-sessions:{userId}` index'ine yazılır.
+  - Set içinde düz session id değil `idas:sess:<sid>` store key'i tutulur.
   - Logout ilgili session key'i index'ten temizler.
-  - `completePasswordReset` aynı modül üzerinden kullanıcının mevcut session'larını invalidate eder.
-6. `completePasswordReset`, session invalidation çalışmadan security-complete kabul edilmemeli. Password reset use-case'i Phase 2'de yer aldığı için minimal invalidation da Phase 2 kapsamındadır.
-7. `account.controller.ts` sadece HTTP mapping yapsın; business logic service'te kalsın.
-8. `account.routes.ts` route wiring yapsın.
-9. `src/routes/index.ts` içine `/account` mount ekle.
-10. Account-specific rate limit middleware'lerini route seviyesinde ekle; global `/api` limiter login/reset güvenliği için yeterli kabul edilmemeli.
+  - Store key `idas:sess:` + `req.sessionID` formatı connect-redis v9 davranışıyla test edilmelidir.
+7. Redis failure policy logout için uygulanır: session destroy başarılı, index cleanup başarısız ise response 204 kalabilir; hata structured log/metric olur.
+8. `account.controller.ts` sadece HTTP mapping yapsın; business logic service'te kalsın.
+9. `account.routes.ts` route wiring yapsın.
+10. `src/routes/index.ts` içine `/account` mount ekle.
+11. Session creation limiter route seviyesinde eklenir. İlk faz defaultları: `5/15m` IP+emailDigest ve `50/15m` IP. Account limiter Redis keys global limiter'dan ayrı explicit prefix kullanmalıdır: ör. `idas:rl:account:session:*`.
 
-Risk: Orta. Login lock/update davranışı, session regeneration, CSRF rotation, session invalidation ve generic response contract dikkat ister.
+Risk: Orta-yüksek. Login lock/update davranışı, session regeneration callback sırası, CSRF rotation ve Redis index consistency bu fazın ana riskidir.
+
+### Phase 2b — Password reset module
+
+1. `account.schemas.ts` içinde password reset schemas oluştur.
+2. `account.service.ts` içinde şu use-case'leri yaz:
+  - `createPasswordResetRequest`
+  - `completePasswordReset`
+3. `password-reset-notifier.ts` içinde `PasswordResetNotifier` interface'ini tanımla ve account service'e dependency olarak inject et; service doğrudan SMTP/provider client'a bağlanmamalı.
+4. `completePasswordReset` aynı `session-invalidation.ts` modülü üzerinden kullanıcının mevcut session'larını invalidate eder.
+5. `completePasswordReset`, session invalidation çalışmadan security-complete kabul edilmemeli.
+6. Redis failure policy password reset için uygulanır: password reset/password change sonrası session invalidation başarısız ise use-case hard failure döner ve security-complete sayılmaz.
+7. Password reset limiter'ları route seviyesinde ekle. İlk faz defaultları: reset request `3/1h` IP+emailDigest ve `20/1h` IP; reset completion `10/15m` IP+route. Account limiter Redis keys global limiter'dan ayrı explicit prefix kullanmalıdır: ör. `idas:rl:account:reset:*`.
+
+Risk: Orta-yüksek. Reset token lifecycle, notifier enqueue semantics, timing oracle, token race condition ve Redis invalidation failure policy bu fazda birlikte test edilmelidir.
 
 ### Phase 3 — Session invalidation hardening
 
-1. Redis session prefix standardize et: ör. `idas:sess:`.
-  - Mevcut `sess:` prefix'inden `idas:sess:` prefix'ine geçiş mevcut Redis session'ları geçersiz kılar. Bu auth migration sırasında kabul edilebilir bir session-killing değişiklik olarak ele alınmalı.
-2. Phase 2'de eklenen minimal user-session index lifecycle'ını harden et:
+1. Phase 2a/2b'de eklenen minimal user-session index lifecycle'ını harden et:
   - Login sonrası Redis set: `idas:user-sessions:{userId}` -> session store keys.
   - Set içinde düz session id yerine store key tut: ör. `idas:sess:<sid>`.
   - Index'e sadece session regeneration sonrası oluşan final authenticated session key eklenir.
   - Logout/session destroy callback'i başarılı olduğunda ilgili session key set'ten kaldırılır.
   - Password reset sonrası set'teki session keys silinir ve `idas:user-sessions:{userId}` set'i temizlenir.
   - Password reset/password change sonrası current session dahil tüm session'ların tekrar login gerektirmesi bilinçli güvenlik kararıdır.
+  - User status `ACTIVE → INACTIVE` değişimi sonrası aynı set temizliği uygulanır; disable edilen kullanıcının aktif session'ları invalidate edilir. `deserializeUser` `INACTIVE` user'ı zaten reddeder, ancak Redis session ancak bir sonraki request'te düşer; index temizliği disable anında aktif session'ları hemen düşürür. User'ı `INACTIVE` yapan user-management/admin endpoint'i bu planın kapsamında değildir; plan yalnızca invalidasyon hook'unu (index mekanizması + failure policy) sağlar ve ilgili endpoint invalidasyonu aynı hook üzerinden çağırmalıdır.
   - `idas:user-sessions:{userId}` set'ine session max age ile uyumlu TTL verilir veya login/logout/reset sırasında best-effort stale cleanup yapılır.
   - TTL ile kendiliğinden düşmüş stale session key'ler invalidation sırasında sorun sayılmaz; set cleanup best-effort yapılır.
-3. Session id rotation olduğunda eski anonymous session key index'e eklenmemeli; eski session destroy/regenerate sonucundaki Redis cleanup test edilmelidir.
-4. Alternatif olarak prefix scan ile user session bulma yaklaşımı sadece düşük hacimli admin operasyonları için değerlendirilebilir; ana tasarım indexed olmalı.
+2. Session id rotation olduğunda eski anonymous session key index'e eklenmemeli; eski session destroy/regenerate sonucundaki Redis cleanup test edilmelidir.
+3. Alternatif olarak prefix scan ile user session bulma yaklaşımı sadece düşük hacimli admin operasyonları için değerlendirilebilir; ana tasarım indexed olmalı.
 
-Risk: Orta. Minimal invalidation Phase 2 kapsamındadır; Phase 3 Redis key lifecycle, TTL, stale cleanup, session id rotation edge-case'leri ve session id temizliğini harden eder.
+Risk: Orta. Minimal invalidation Phase 2a/2b kapsamındadır; Phase 3 Redis key lifecycle, TTL, stale cleanup, session id rotation edge-case'leri ve session id temizliğini harden eder. Session store prefix değişikliği bu faza bırakılmaz; `idas:sess:` Phase 1/2a'da uygulanmış olmalıdır.
 
 > Not: Authorization middleware (`requireAuth`, `requirePermission`, `requireScopedPermission`) bu planın kapsamı değildir; ayrı authorization fazında `src/modules/authorization/*` altında uygulanmıştır. Bkz. `docs/braid/architecture/03-authorization/`. Account endpointleri korunması gerektiğinde bu mevcut middleware'ler kullanılır.
 
@@ -462,31 +584,47 @@ Risk: Orta. Minimal invalidation Phase 2 kapsamındadır; Phase 3 Redis key life
 
 Öncelikli testler:
 
+- `deserializeUser` runtime payload'ı `AuthenticatedUser` tipiyle uyumludur ve `id`, `email`, `status` döner.
+- LocalStrategy credential lookup `users.email` + `user_credentials.user_id` join path'i üzerinden çalışır.
+- Redis session store prefix'i auth v2 başlangıcında `idas:sess:` olur; user-session index `idas:sess:<sid>` store key'lerini tutar.
 - Login success session cookie üretir.
 - Login success Redis-backed session ile `GET /api/account/session` döner.
 - Login success session id rotate eder; pre-login anonymous session id authenticated session id olarak kalmaz.
+- `req.login()` ve `issueCsrfToken(req)` sadece `req.session.regenerate()` tamamlandıktan sonra yeni session üzerinde çalışır.
 - Login sonrası pre-login CSRF token mutating endpointlerde geçerli olmaz.
+- Login response'u yeni authenticated `csrfToken` döner.
 - Login sonrası yeni authenticated CSRF token ile unsafe account endpointleri çalışır.
 - Yanlış email/password aynı generic 401 response'u döner.
 - Inactive user generic 401 response'u döner.
 - Credential olmayan user generic 401 response'u döner.
 - User yok/inactive/credential yok dallarında dummy bcrypt compare çalışır; response timing belirgin account existence oracle üretmez.
+- Dummy bcrypt hash cost factor gerçek credential hash cost factor ile aynıdır.
 - Failed count 5. başarısız denemede lock set eder.
 - Lock süresi dolduktan sonraki ilk başarısız deneme yeni failure penceresini `failed_login_count = 1` ile başlatır.
 - Bcrypt compare DB transaction/row lock dışında çalışır; sadece state mutation atomik update ile yapılır.
+- Concurrent başarısız login denemeleri failed count'u application-side overwrite yapmadan DB tarafında atomik increment eder.
 - Locked account password compare yapmadan generic 401 döner.
 - Başarılı login failed count ve lock state'i temizler.
 - Logout session destroy eder ve user-session Redis index'inden session key'i temizler.
 - Password reset sonrası eski session `GET /api/account/session` için 401 olur.
 - Password reset sonrası user-session Redis index'i temizlenir.
+- Password reset sırasında Redis session invalidation başarısız olursa use-case hard failure döner.
+- User status `ACTIVE → INACTIVE` yapıldıktan sonra kullanıcının aktif session'ı `GET /api/account/session` için 401 olur.
+- User disable sonrası user-session Redis index'i temizlenir.
+- User disable sonrası Redis session invalidation başarısız olursa invalidasyon hook'u hard failure döner.
+- Logout sırasında session destroy başarılı ama index cleanup başarısızsa 204 döner ve structured log/metric üretilir.
 - Password reset token DB'de raw değil hash olarak saklanır.
-- Password reset token verification invalid/expired/user inactive durumlarında detay sızdırmaz.
-- Password reset token verification ve reset completion endpointleri rate limit altındadır.
+- Password reset completion invalid/expired/used/user inactive token durumlarında detay sızdırmaz.
+- Password reset completion endpoint'i rate limit altındadır.
+- Ayrı password reset token verification endpoint'i ilk fazda mount edilmez.
 - CSRF token olmadan unsafe account mutation endpointleri 403 döner.
 - `POST /api/account/password-reset-requests` user yokken de 204 döner.
 - Password reset request path'i user var/yok dallarında belirgin timing oracle üretmez.
+- Password reset request mail/provider client'a doğrudan bağlanmaz; injected fake `PasswordResetNotifier` üzerinden enqueue çağrısı test edilir.
+- Password reset completion ön kontrol sonrası token başka request tarafından kullanılırsa transaction içi tekrar kontrol generic failure döner ve yeni hash persist edilmez.
 - Reset token TTL `1 hour` olarak set edilir ve yeni reset talebi aynı user'ın eski token'ını invalidate eder.
 - Account-specific rate limit generic response contract ile çalışır ve email/account existence sızdırmaz.
+- Account-specific Redis limiter keyspace'i global `/api` limiter'dan explicit prefix ile ayrılır (`idas:rl:account:*`).
 - Account-specific limiter testleri sayaç state'ini testler arasında izole eder; Redis/fake Redis veya resetlenebilir injected limiter kullanılır.
 - Allowed CORS origin credentials ile çalışır; disallowed origin reddedilir.
 
@@ -520,7 +658,7 @@ Taşınacak fikirler:
 - Passport LocalStrategy kullanımı.
 - Session'a sadece user id serialize edilmesi.
 - Login sonrası safe user payload dönülmesi.
-- Role/permission bilgisinin `req.user` üzerinden authorization katmanına sunulması.
+- Role/permission kararlarının authorization katmanında DB/cache üzerinden verilmesi; `req.user` sadece minimal `id`, `email`, `status` payload'ı taşımalıdır.
 - Redis-backed session store.
 
 Taşınmayacak uygulamalar:
@@ -537,7 +675,7 @@ Taşınmayacak uygulamalar:
 
 ## Security Notes
 
-- Password hash için bcrypt kullanılacak; v2 planındaki rounds `12` korunacak.
+- Password hash için Phase 1'de seçilen bcrypt-compatible implementasyon kullanılacak; deploy/CI uyumluluğu nedeniyle varsayılan tercih `bcryptjs`, native `bcrypt` için Docker/CI doğrulaması zorunludur. v2 planındaki rounds `12` korunacak.
 - Password minimum uzunluğu `15` karakter olmalı.
 - Bcrypt 72-byte limiti nedeniyle `Buffer.byteLength(password, 'utf8') <= 72` kontrolü yapılmalı.
 - Password schema ayrıca maksimum karakter/byte sınırı koymalı; body limit tek başına password policy yerine geçmemeli.
@@ -547,16 +685,20 @@ Taşınmayacak uygulamalar:
 - Production'da `secure: true` kalmalı.
 - Mevcut `sessionMaxAgeMs = 24h` absolute timeout olarak ele alınmalı; rolling/idle timeout isteniyorsa ayrıca tasarlanmalı.
 - Başarılı login session id rotate etmeli ve authenticated session için yeni CSRF token üretilmeli.
+- CSRF token karşılaştırması sabit zamanlı yapılmalıdır; `===` gibi kısa-devre string compare yerine `crypto.timingSafeEqual` kullanılmalıdır (önce her iki tarafın aynı uzunlukta olduğu doğrulanmalı, aksi halde `timingSafeEqual` throw eder). Bu kural reset token compare kuralıyla tutarlıdır; CSRF token da her mutating request'te karşılaştırılan bir secret'tır ve timing side-channel'e açık bırakılmamalıdır.
 - Cross-site frontend gerekiyorsa `sameSite: 'none'` + `secure: true` zorunludur; mevcut `lax` kararı aynı-site/subpath deployment için uygundur. Deployment topolojisi kesinleşince env ile ayarlanabilir hale getirilmeli.
 - Production CORS origin allowlist env/config üzerinden yönetilmeli; `credentials: true` ile wildcard origin asla kullanılmamalı.
-- Login ve password reset endpointleri global `/api` rate limit dışında auth/account-specific daha düşük rate limit altında kalmalı. Login için IP + normalized email digest bazlı; password reset request için IP + normalized email digest bazlı; token verification için IP + route bazlı limit önerilir.
+- Login ve password reset endpointleri global `/api` rate limit dışında auth/account-specific daha düşük rate limit altında kalmalı. Login için IP + normalized email digest bazlı; password reset request için IP + normalized email digest bazlı; reset completion için IP + route bazlı limit uygulanır.
 - Rate limit key'lerinde normalized email doğrudan saklanmamalı; HMAC veya SHA-256 digest gibi non-raw temsil kullanılmalı.
 - Production'da auth/account rate limit store hatasında fail-open/fail-closed kararı açık olmalı; credential brute force yüzeyinde fail-closed tercih edilmelidir.
 - Auth/account-specific limiter'ın environment davranışı explicit olmalıdır: production Redis-backed ve fail-closed çalışmalı; dev/test için Redis-backed fake/test Redis veya inject edilebilir resetlenebilir memory limiter seçimi belgelenmelidir.
+- Account limiter Redis keys global `/api` limiter keyspace'iyle karışmamalıdır; account limiter için explicit prefix kullanılmalıdır (`idas:rl:account:*`).
 - CSRF middleware login/logout/reset gibi cookie-auth state değiştiren endpointlerde aktif kalmalı. İlk CSRF token için `/api/csrf-token` kullanılmaya devam edilebilir.
 - Logs hiçbir zaman password, raw reset token, session id veya cookie değeri içermemeli.
 - HTTP logger/redaction config `cookie`, `authorization`, CSRF header, password alanları ve token alanlarını redact etmelidir.
 - Auth operational logları structured olmalı, ancak email/token/session id gibi değerleri raw değil redacted veya digest olarak içermelidir.
+- Login failure, account lock, password reset request accepted/enqueued, password reset completed ve session invalidation failure olayları structured log/metric olarak izlenmelidir.
+- Metric/log label'larında raw email yerine digest, raw token yerine event outcome, session id yerine redacted/sessionless correlation kullanılmalıdır.
 
 
 
@@ -565,51 +707,52 @@ Taşınmayacak uygulamalar:
 1. Frontend/API aynı site mi çalışacak, yoksa cross-site cookie gerekiyor mu?
   - Aynı site: `sameSite: 'lax'` yeterli.
   - Cross-site: `sameSite: 'none'`, `secure: true`, CORS credentials/origin allowlist zorunlu.
-2. Login sonrası CSRF token client'a nasıl verilecek?
-  - Seçenek A: `POST /api/account/session` response'u yeni authenticated CSRF token döner.
-  - Seçenek B: Client başarılı login sonrası tekrar `GET /api/csrf-token` çağırır.
-  - Her iki seçenekte de pre-login CSRF token login sonrası geçersiz kabul edilmelidir.
-3. Account/auth-specific rate limit değerleri ne olacak?
-  - Öneri: session creation için IP + email digest bazlı kısa pencere; password reset request için IP + email digest bazlı daha sıkı pencere; token verification/reset completion için IP + route bazlı limit.
-  - Production store hatasında credential brute force yüzeyi için fail-closed varsayımı tercih edilmelidir.
-  - Auth limiter hangi ortamlarda Redis-backed olacak ve testlerde sayaç state'i nasıl izole edilecek? Tercih edilen yaklaşım production ile aynı davranış için test Redis/fake Redis kullanmak veya limiter'ı dependency injection ile resetlenebilir kılmaktır.
-4. Session invalidation için Redis user-session index'i hemen mi eklenecek?
-  - Evet, minimal user-session index Phase 2 içinde eklenmelidir; çünkü password reset completion Phase 2'de yer alır ve reset sonrası session invalidation security requirement'tır. Phase 3 sadece hardening/TTL/stale cleanup/standardizasyon kapsamıdır.
-5. Email gönderim altyapısı v2'de hangi modülde kurulacak?
-  - Account service doğrudan provider'a bağlanmamalı; `communication`/`notifications` adapter'ı beklenmeli.
-6. Admin panel ayrı frontend olduğu için ayrı auth endpoint gerekir mi?
+2. Auth limiter dev/test ortamlarında hangi store ile çalışacak ve testlerde sayaç state'i nasıl izole edilecek?
+  - Rate limit değerleri, production fail-closed davranışı ve account limiter prefix kararı Implementasyon Öncesi Kilit Kararlar bölümünde sabitlenmiştir.
+  - Testlerde production ile aynı davranış için test Redis/fake Redis kullanmak veya limiter'ı dependency injection ile resetlenebilir kılmak gerekir.
+3. Email provider/queue altyapısının production adapter'ı hangi modülde kurulacak?
+  - Account service doğrudan provider'a bağlanmaz; ilk fazda `PasswordResetNotifier` interface'i kullanılır.
+  - Gerçek provider adapter'ı ileride `communication`/`notifications` modülünde kurulmalıdır.
+4. Admin panel ayrı frontend olduğu için ayrı auth endpoint gerekir mi?
   - Hayır. Canonical endpoint tek kalmalı: `POST /api/account/session`. Admin/user ayrımı authentication değil authorization kararıdır. Gerekirse aynı endpoint body içinde opsiyonel `audience: 'admin'` desteklenebilir, fakat ilk fazda route-level authorization ile yetinmek daha güvenli varsayılandır.
-7. Password reset token verification endpoint'i gerçekten gerekli mi?
-  - Ürün UX'i ayrı token pre-check gerektirmiyorsa ilk fazda kaldırılıp doğrulama sadece `POST /api/account/password-resets` içinde yapılabilir. Kalacaksa generic failure, no raw token logging ve sıkı rate limit zorunludur.
-8. Password unicode normalization politikası ne olacak?
+5. Password unicode normalization politikası ne olacak?
   - İlk fazda en azından byte limit, validation ve hashing aynı canonical input'a dayanmalı; daha kapsamlı normalization/blocklist politikası ayrı password policy kararı olarak ele alınabilir.
-9. Session timeout modeli absolute mı idle/rolling mi olacak?
+6. Session timeout modeli absolute mı idle/rolling mi olacak?
   - Mevcut `sessionMaxAgeMs = 24h` absolute timeout varsayımıdır. Admin paneli için ayrıca idle timeout veya daha kısa session süresi isteniyorsa auth/session config ve testleri buna göre genişletilmelidir.
 
 
 
 ## Rollback Strategy
 
-- Phase 1 rollback: `passport-local` strategy wiring geri alınır; mevcut serialize/deserialize korunur.
-- Phase 2 rollback: `/api/account/*` route mount kaldırılır; mevcut API yüzeyi etkilenmez. Password reset endpoint'i yayında kalacaksa minimal user-session invalidation geri alınmamalıdır.
-- Phase 3 rollback: user-session Redis index hardening/TTL/stale cleanup iyileştirmeleri devre dışı bırakılır; Phase 2 minimal invalidation korunur.
+- Phase 1 rollback: `passport-local` strategy wiring ve `idas:sess:` prefix kararı geri alınacaksa Redis test/prod session etkisi ayrıca değerlendirilir. Auth v2 başlangıcında prod session olmadığı varsayımıyla prefix rollback beklenen bir operasyon değildir.
+- Phase 2a rollback: `/api/account/session` route mount kaldırılır; mevcut API yüzeyi etkilenmez. `idas:sess:` prefix kararı korunur veya bilinçli session-killing rollback olarak ele alınır.
+- Phase 2b rollback: password reset route mount kaldırılır. Password reset endpoint'i yayında kalacaksa minimal user-session invalidation geri alınmamalıdır.
+- Phase 3 rollback: user-session Redis index hardening/TTL/stale cleanup iyileştirmeleri devre dışı bırakılır; Phase 2a/2b minimal invalidation korunur.
 
 
 
 ## Exit Criteria
 
+- `deserializeUser` `AuthenticatedUser` runtime shape'iyle uyumlu şekilde `id`, `email`, `status` döner.
+- LocalStrategy login lookup'ı `users.email` canonical kaynağı ve `user_credentials.user_id` join'i üzerinden çalışır.
+- Redis session store prefix'i auth v2 başlangıcında `idas:sess:` olur ve user-session index aynı store key formatını kullanır.
 - `POST /api/account/session` başarılı credential ile session cookie üretir.
 - `POST /api/account/session` başarılı login sırasında session id rotate eder.
-- Login sonrası authenticated session için yeni CSRF token üretilir veya client'ın yeni token alacağı contract test edilir.
+- `req.login()` ve yeni CSRF üretimi session regenerate tamamlandıktan sonra yeni session üzerinde yapılır.
+- Login sonrası authenticated session için yeni CSRF token üretilir ve `POST /api/account/session` response'unda döner.
 - `GET /api/account/session` session ile kullanıcıyı ve role/scope özetini döner.
 - `DELETE /api/account/session` session'ı destroy eder ve Redis user-session index'ini temizler.
 - Session creation failure durumları generic nested error contract ile döner.
 - No-user, inactive-user ve no-credential login dalları dummy bcrypt compare ile timing oracle riskini azaltır.
 - Password reset token DB'de raw saklanmaz.
-- Password reset token verification/reset invalid durumları token/account state detayı sızdırmaz.
+- Password reset completion invalid/expired/used/user inactive token durumlarında token/account state detayı sızdırmaz.
+- Ayrı password reset token verification endpoint'i ilk fazda bulunmaz.
 - Password reset sonrası kullanıcının mevcut Redis session'ları invalidate edilir.
-- Account-specific rate limit login/reset/token endpointlerinde global limiter'dan ayrı çalışır.
+- User status `ACTIVE → INACTIVE` değişimi sonrası kullanıcının aktif Redis session'ları invalidate edilir.
+- Account-specific rate limit login/reset endpointlerinde global limiter'dan ayrı çalışır ve Redis keyspace'i explicit `idas:rl:account:*` prefix'iyle izole edilir.
 - Auth logs password, raw reset token, session id, cookie ve CSRF token içermez.
+- Auth operational log/metric'leri login failure, account lock, password reset enqueue/completion ve session invalidation failure olaylarını raw secret/PII sızdırmadan izler.
+- Password reset request `PasswordResetNotifier` adapter'ı üzerinden enqueue edilir; account service provider'a doğrudan bağlanmaz.
 - Account route'ları Zod validation kullanır.
 - `tsc --noEmit` ve auth integration testleri geçer.
 

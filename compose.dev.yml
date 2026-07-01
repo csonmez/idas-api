@@ -19,7 +19,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: idas-api
     ports:
-      - '${POSTGRES_PORT:-5432}:5432'
+      - '${POSTGRES_PORT:-5423}:5432'
     volumes:
       - idas_data:/var/lib/postgresql
     healthcheck:
